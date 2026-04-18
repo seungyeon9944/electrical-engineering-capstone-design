@@ -133,13 +133,35 @@ class ParkingManager:
 
     def print_status(self):
         stats = self.db.get_stats()
-        print(f"\n{'='*40}")
+        print(f"\n{'='*45}")
         print(f"  주차장 현황 ({datetime.now().strftime('%Y-%m-%d %H:%M')})")
-        print(f"{'='*40}")
+        print(f"{'='*45}")
         print(f"  전체 슬롯 : {stats['total_slots']}")
         print(f"  사용 중   : {stats['occupied']}")
         print(f"  여유      : {stats['available']}")
         print(f"  점유율    : {stats['occupancy_rate']}%")
         print(f"  오늘 입차 : {stats['today_entries']}")
-        print(f"{'='*40}")
+
+        # 층별 현황
+        floor_stats = self.db.get_floor_stats()
+        if len(floor_stats) > 1:
+            print(f"{'─'*45}")
+            print("  [층별 현황]")
+            for fs in floor_stats:
+                bar_len = int(fs["occupied"] / max(fs["total"], 1) * 20)
+                bar = "█" * bar_len + "░" * (20 - bar_len)
+                print(f"  {fs['floor']+1}층 {bar} "
+                      f"{fs['occupied']}/{fs['total']}")
+
+        # 추천 슬롯 Top-3
+        top = self.slot_manager.get_top_slots(top_k=3)
+        if top:
+            print(f"{'─'*45}")
+            print("  [배치 알고리즘 추천 슬롯 Top-3]")
+            for rank, (slot, cost) in enumerate(top, 1):
+                print(f"  {rank}. {slot.slot_name} "
+                      f"({slot.floor+1}층-{chr(65+slot.row_idx)}{slot.col_idx+1:02d}) "
+                      f"cost={cost:.2f}")
+
+        print(f"{'='*45}")
         self.slot_manager.print_layout()

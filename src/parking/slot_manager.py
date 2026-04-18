@@ -1,85 +1,137 @@
 """
-주차 슬롯 관리 모듈
-지정좌석 배정 및 실시간 슬롯 상태 추적
+주차 슬롯 관리 모듈 (다층 지원)
+
+YOLOv7 + OCR로 인식된 번호판을 받아
+MultiFloorAllocator 배치 알고리즘으로 최적 슬롯을 배정한다.
 """
 
 from typing import Optional, Dict, List
+
 from ..database.db_manager import DatabaseManager
+from .allocation_algorithm import MultiFloorAllocator, SlotCandidate
 
 
 class SlotManager:
     def __init__(self, config: dict, db: DatabaseManager):
         park_cfg = config.get("parking", {})
-        self.rows = park_cfg.get("slot_layout", {}).get("rows", 5)
-        self.cols = park_cfg.get("slot_layout", {}).get("cols", 10)
-        self.total_slots = self.rows * self.cols
+        layout = park_cfg.get("slot_layout", {})
+        self.floors = layout.get("floors", 1)
+        self.rows = layout.get("rows", 5)
+        self.cols = layout.get("cols", 10)
+        self.total_slots = self.floors * self.rows * self.cols
         self.db = db
-        self.db.initialize_slots(self.rows, self.cols)
+        self.allocator = MultiFloorAllocator(config)
+        self.db.initialize_slots(self.rows, self.cols, self.floors)
+
+    # ── 슬롯 배정 ─────────────────────────────────────────────────
 
     def assign_slot(self, plate_num: str) -> Optional[Dict]:
         """
-        등록 차량이면 지정 슬롯, 미등록이면 빈 슬롯 중 가장 가까운 입구 배정
+        번호판으로 최적 슬롯 배정.
+
+        등록 차량은 지정 슬롯 우선,
+        미등록 차량은 MultiFloorAllocator 비용 함수로 결정.
         """
         vehicle_info = self.db.get_vehicle_info(plate_num)
-        if vehicle_info and vehicle_info.get("assigned_slot"):
-            slot_id = vehicle_info["assigned_slot"]
-            all_slots = {s["id"]: s for s in self.db.get_all_slots()}
-            slot = all_slots.get(slot_id)
-            if slot and not slot["is_occupied"]:
-                self.db.set_slot_occupied(slot_id, True)
-                return slot
-            # 지정 슬롯이 이미 점유된 경우 인접 슬롯 탐색
-            return self._assign_nearest(slot_id)
+        preferred_slot_id: Optional[int] = None
+        preferred_floor: Optional[int] = None
+        vehicle_type = "sedan"
 
-        # 미등록 차량: 첫 번째 빈 슬롯
-        available = self.db.get_available_slots()
-        if not available:
-            return None
-        slot = available[0]
-        self.db.set_slot_occupied(slot["id"], True)
-        return slot
+        if vehicle_info:
+            preferred_slot_id = vehicle_info.get("assigned_slot")
+            vehicle_type = vehicle_info.get("vehicle_type", "sedan")
 
-    def _assign_nearest(self, preferred_id: int) -> Optional[Dict]:
-        available = self.db.get_available_slots()
-        if not available:
+        candidates = self._build_candidates()
+
+        # 지정 슬롯이 있으면 preferred_floor 추출
+        if preferred_slot_id:
+            ref = next((c for c in candidates if c.slot_id == preferred_slot_id), None)
+            if ref:
+                preferred_floor = ref.floor
+
+        best = self.allocator.assign(
+            candidates,
+            vehicle_type=vehicle_type,
+            preferred_slot_id=preferred_slot_id,
+            preferred_floor=preferred_floor,
+        )
+        if best is None:
             return None
-        # 선호 슬롯과 ID 차이가 가장 작은 슬롯
-        nearest = min(available, key=lambda s: abs(s["id"] - preferred_id))
-        self.db.set_slot_occupied(nearest["id"], True)
-        return nearest
+
+        self.db.set_slot_occupied(best.slot_id, True)
+        return self.db.get_slot_by_id(best.slot_id)
 
     def release_slot(self, slot_id: int):
         self.db.set_slot_occupied(slot_id, False)
 
-    def get_layout_map(self) -> List[List[Dict]]:
-        """2D 슬롯 배치 맵 반환 (rows × cols)"""
+    # ── 조회/시각화 ───────────────────────────────────────────────
+
+    def get_layout_map(self) -> Dict[int, List[List[Dict]]]:
+        """층 → 2D 슬롯 배치 맵 반환"""
         all_slots = self.db.get_all_slots()
-        slot_map = {(s["row_idx"], s["col_idx"]): s for s in all_slots}
-        layout = []
-        for r in range(self.rows):
-            row = []
-            for c in range(self.cols):
-                row.append(slot_map.get((r, c), {}))
-            layout.append(row)
+        layout: Dict[int, List[List[Dict]]] = {}
+        for f in range(self.floors):
+            grid = [[{} for _ in range(self.cols)] for _ in range(self.rows)]
+            layout[f] = grid
+        for s in all_slots:
+            f, r, c = s.get("floor", 0), s["row_idx"], s["col_idx"]
+            if f in layout and 0 <= r < self.rows and 0 <= c < self.cols:
+                layout[f][r][c] = s
         return layout
 
+    def get_floor_summary(self) -> Dict[int, Dict]:
+        """층별 점유 현황 반환"""
+        candidates = self._build_candidates()
+        return self.allocator.floor_summary(candidates)
+
+    def get_top_slots(self, top_k: int = 5) -> list:
+        """비용 순 상위 추천 슬롯 목록 반환 (배치 알고리즘 출력)"""
+        candidates = self._build_candidates()
+        return self.allocator.rank_candidates(candidates, top_k=top_k)
+
     def print_layout(self):
-        layout = self.get_layout_map()
-        header = "    " + "  ".join(f"{c+1:02d}" for c in range(self.cols))
-        print(header)
-        print("    " + "--" * self.cols * 2)
-        for r, row in enumerate(layout):
-            row_str = chr(65 + r) + " | "
-            for slot in row:
-                if not slot:
-                    row_str += "?? "
-                elif slot["is_occupied"]:
-                    row_str += "[X]"
-                elif slot["is_reserved"]:
-                    row_str += "[R]"
-                else:
-                    row_str += "[ ]"
-            print(row_str)
+        layout_map = self.get_layout_map()
+        summary = self.get_floor_summary()
+        for f in range(self.floors):
+            occ_info = summary.get(f, {})
+            print(f"\n[{f+1}층]  점유: {occ_info.get('occupied', 0)}/"
+                  f"{occ_info.get('total', 0)}  ({occ_info.get('occupancy_rate', 0)}%)")
+            header = "    " + "  ".join(f"{c+1:02d}" for c in range(self.cols))
+            print(header)
+            print("    " + "---" * self.cols)
+            grid = layout_map.get(f, [])
+            for r, row in enumerate(grid):
+                row_str = chr(65 + r) + " | "
+                for slot in row:
+                    if not slot:
+                        row_str += " ? "
+                    elif slot.get("is_occupied"):
+                        row_str += "[X]"
+                    elif slot.get("is_reserved"):
+                        row_str += "[R]"
+                    else:
+                        row_str += "[ ]"
+                print(row_str)
+
         stats = self.db.get_stats()
-        print(f"\n점유: {stats['occupied']}/{stats['total_slots']} "
+        print(f"\n전체: {stats['occupied']}/{stats['total_slots']} "
               f"({stats['occupancy_rate']}%)")
+
+    # ── 내부 헬퍼 ─────────────────────────────────────────────────
+
+    def _build_candidates(self) -> list:
+        """DB 슬롯 목록 → SlotCandidate 리스트 변환"""
+        all_slots = self.db.get_all_slots()
+        return [
+            SlotCandidate(
+                slot_id=s["id"],
+                slot_name=s["slot_name"],
+                floor=s.get("floor", 0),
+                row_idx=s["row_idx"],
+                col_idx=s["col_idx"],
+                slot_type=s.get("slot_type", "normal"),
+                is_occupied=bool(s["is_occupied"]),
+                is_reserved=bool(s["is_reserved"]),
+            )
+            for s in all_slots
+        ]

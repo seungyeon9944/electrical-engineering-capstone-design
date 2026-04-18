@@ -50,6 +50,7 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS parking_slots (
                     id          INTEGER PRIMARY KEY,
                     slot_name   TEXT    NOT NULL UNIQUE,
+                    floor       INTEGER NOT NULL DEFAULT 0,
                     row_idx     INTEGER NOT NULL,
                     col_idx     INTEGER NOT NULL,
                     is_occupied INTEGER DEFAULT 0,
@@ -152,17 +153,34 @@ class DatabaseManager:
 
     # ── 슬롯 관리 ──────────────────────────────────────────────
 
-    def initialize_slots(self, rows: int, cols: int):
+    def initialize_slots(self, rows: int, cols: int, floors: int = 1):
+        """
+        다층 주차장 슬롯 초기화.
+
+        슬롯 이름 규칙: ``F<층>-<행><열>``  예) F1-A01, F2-B03
+        슬롯 ID:       floor * rows * cols + row * cols + col + 1
+        """
+        # 기존 DB에 floor 컬럼이 없을 경우 마이그레이션
         with self._connect() as conn:
-            for r in range(rows):
-                for c in range(cols):
-                    slot_name = f"{chr(65+r)}{c+1:02d}"
-                    slot_id = r * cols + c + 1
-                    conn.execute(
-                        """INSERT OR IGNORE INTO parking_slots
-                           (id, slot_name, row_idx, col_idx) VALUES (?, ?, ?, ?)""",
-                        (slot_id, slot_name, r, c),
-                    )
+            cols_info = conn.execute("PRAGMA table_info(parking_slots)").fetchall()
+            col_names = [c[1] for c in cols_info]
+            if "floor" not in col_names:
+                conn.execute(
+                    "ALTER TABLE parking_slots ADD COLUMN floor INTEGER NOT NULL DEFAULT 0"
+                )
+
+        with self._connect() as conn:
+            for f in range(floors):
+                for r in range(rows):
+                    for c in range(cols):
+                        slot_name = f"F{f+1}-{chr(65+r)}{c+1:02d}"
+                        slot_id = f * rows * cols + r * cols + c + 1
+                        conn.execute(
+                            """INSERT OR IGNORE INTO parking_slots
+                               (id, slot_name, floor, row_idx, col_idx)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (slot_id, slot_name, f, r, c),
+                        )
 
     def set_slot_occupied(self, slot_id: int, occupied: bool):
         with self._connect() as conn:
@@ -183,7 +201,27 @@ class DatabaseManager:
     def get_all_slots(self) -> List[Dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM parking_slots ORDER BY id"
+                "SELECT * FROM parking_slots ORDER BY floor, id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_slot_by_id(self, slot_id: int) -> Optional[Dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM parking_slots WHERE id=?", (slot_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_floor_stats(self) -> List[Dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT floor,
+                          COUNT(*) AS total,
+                          SUM(is_occupied) AS occupied,
+                          COUNT(*) - SUM(is_occupied) AS available
+                   FROM parking_slots
+                   GROUP BY floor
+                   ORDER BY floor"""
             ).fetchall()
         return [dict(r) for r in rows]
 

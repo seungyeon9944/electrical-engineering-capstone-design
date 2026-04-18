@@ -39,13 +39,25 @@ preprocessing:
   morph_kernel_size: 3
 
 parking:
-  total_slots: 50
+  total_slots: 150          # floors * rows * cols
   reserved_ratio: 0.2       # 장애인/특수 슬롯 비율
   entry_camera_id: 0
   exit_camera_id: 1
   slot_layout:
-    rows: 5
-    cols: 10
+    floors: 3               # 주차장 층 수
+    rows: 5                 # 층당 행 수
+    cols: 10                # 층당 열 수
+
+# 배치 알고리즘 설정
+allocation:
+  load_balance: true        # 층별 부하 균형 활성화
+  entrance_position:
+    row: 0                  # 층별 입구 행 위치 (0=맨 앞)
+    col: 0                  # 층별 입구 열 위치 (0=맨 왼쪽)
+  weights:
+    floor: 1.5              # 층 전환 비용 가중치 (높을수록 낮은 층 선호)
+    distance: 1.0           # 보행 거리 비용 가중치
+    load: 0.8               # 층 점유율 균형 가중치
 
 database:
   path: "data/parking.db"
