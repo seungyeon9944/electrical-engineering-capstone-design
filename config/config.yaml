@@ -1,0 +1,58 @@
+system:
+  name: "Smart Unmanned Parking System"
+  version: "1.0.0"
+  debug: false
+
+camera:
+  source: 0          # 0=웹캠, rtsp://... 또는 파일 경로
+  width: 1280
+  height: 720
+  fps: 30
+
+yolo:
+  weights: "models/yolov7/best.pt"
+  pretrained_weights: "models/yolov7/yolov7.pt"
+  img_size: 640
+  conf_threshold: 0.45
+  iou_threshold: 0.45
+  classes:
+    - license_plate
+    - vehicle
+    - person
+    - animal
+  device: "cuda"     # "cuda" or "cpu"
+  half: true         # FP16 추론 (GPU만 해당)
+
+ocr:
+  tesseract_cmd: "tesseract"      # Windows: "C:/Program Files/Tesseract-OCR/tesseract.exe"
+  lang: "kor+eng"
+  config: "--psm 8 --oem 3"
+  plate_pattern: "^[0-9]{2,3}[가-힣][0-9]{4}$"
+  min_confidence: 60
+
+preprocessing:
+  use_c_extension: false    # True: C 고속 처리, False: Python 처리
+  gaussian_blur_kernel: 5
+  clahe_clip_limit: 3.0
+  clahe_tile_grid: [8, 8]
+  deskew_threshold: 2.0     # 기울기 보정 임계값 (도)
+  morph_kernel_size: 3
+
+parking:
+  total_slots: 50
+  reserved_ratio: 0.2       # 장애인/특수 슬롯 비율
+  entry_camera_id: 0
+  exit_camera_id: 1
+  slot_layout:
+    rows: 5
+    cols: 10
+
+database:
+  path: "data/parking.db"
+  backup_interval: 3600     # 초 단위 자동 백업
+
+logging:
+  level: "INFO"
+  file: "logs/parking_system.log"
+  max_size_mb: 50
+  backup_count: 5
